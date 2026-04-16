@@ -5,7 +5,7 @@ const Razorpay = require("razorpay");
 const crypto = require("crypto");
 const cors = require("cors");
 const nodemailer = require("nodemailer");
-const sqlite3 = require("sqlite3").verbose();
+const Database = require("better-sqlite3"); // 🔥 FIXED
 const PDFDocument = require("pdfkit");
 const fs = require("fs");
 const twilio = require("twilio");
@@ -15,16 +15,17 @@ app.use(express.json());
 app.use(cors());
 
 /* ===============================
-   MAKE INVOICE PUBLIC 🔥
+   STATIC INVOICE
 =============================== */
 app.use("/invoices", express.static("invoices"));
 
 /* ===============================
-   DATABASE
+   DATABASE (FIXED)
 =============================== */
-const db = new sqlite3.Database("./malati.db");
+const db = new Database("malati.db");
 
-db.run(`
+// create table
+db.prepare(`
   CREATE TABLE IF NOT EXISTS orders (
     id INTEGER PRIMARY KEY AUTOINCREMENT,
     orderId TEXT,
@@ -37,33 +38,29 @@ db.run(`
     status TEXT,
     createdAt DATETIME DEFAULT CURRENT_TIMESTAMP
   )
-`);
+`).run();
 
 /* ===============================
-   SAVE ORDER
+   SAVE ORDER (FIXED)
 =============================== */
 function saveOrder(order){
-  return new Promise((resolve, reject) => {
-    db.run(
-      `INSERT INTO orders 
-      (orderId, name, phone, address, items, total, paymentId, status)
-      VALUES (?, ?, ?, ?, ?, ?, ?, ?)`,
-      [
-        order.orderId,
-        order.name,
-        order.phone,
-        order.address,
-        JSON.stringify(order.items),
-        order.total,
-        order.paymentId,
-        order.status
-      ],
-      function(err){
-        if(err) reject(err);
-        else resolve(this.lastID);
-      }
-    );
-  });
+
+  const stmt = db.prepare(`
+    INSERT INTO orders 
+    (orderId, name, phone, address, items, total, paymentId, status)
+    VALUES (?, ?, ?, ?, ?, ?, ?, ?)
+  `);
+
+  stmt.run(
+    order.orderId,
+    order.name,
+    order.phone,
+    order.address,
+    JSON.stringify(order.items),
+    order.total,
+    order.paymentId,
+    order.status
+  );
 }
 
 /* ===============================
@@ -146,8 +143,8 @@ async function sendWhatsApp(order){
     `• ${i.name} × ${i.qty} = ₹${i.price * i.qty}`
   ).join("\n");
 
-  const invoiceLink = `https://your-backend-url.com/invoices/${order.orderId}.pdf`;
-  const trackLink = `https://your-backend-url.com/track/${order.orderId}`;
+  const invoiceLink = `https://malati-backend.onrender.com/invoices/${order.orderId}.pdf`;
+  const trackLink = `https://malati-backend.onrender.com/track/${order.orderId}`;
 
   const message = `
 🙏 Thank you for visiting *Malati Food Products*
@@ -242,8 +239,7 @@ app.post("/verify-payment", async (req, res) => {
     status: "Processing"
   };
 
-  await saveOrder(orderData);
-
+  saveOrder(orderData);
   await sendOrderEmail(orderData);
   await sendWhatsApp(orderData);
 
@@ -255,40 +251,33 @@ app.post("/verify-payment", async (req, res) => {
 =============================== */
 app.get("/track/:orderId", (req, res) => {
 
-  db.get(
-    `SELECT * FROM orders WHERE orderId = ?`,
-    [req.params.orderId],
-    (err, row)=>{
-      if(!row){
-        return res.send("Order not found");
-      }
+  const row = db.prepare(
+    `SELECT * FROM orders WHERE orderId = ?`
+  ).get(req.params.orderId);
 
-      res.send(`
-        <h2>Order Status</h2>
-        <p>Order ID: ${row.orderId}</p>
-        <p>Status: ${row.status}</p>
-      `);
-    }
-  );
+  if(!row){
+    return res.send("Order not found");
+  }
+
+  res.send(`
+    <h2>Order Status</h2>
+    <p>Order ID: ${row.orderId}</p>
+    <p>Status: ${row.status}</p>
+  `);
 });
 
 /* ===============================
-   UPDATE STATUS (YOU USE)
+   UPDATE STATUS
 =============================== */
 app.post("/update-status", (req, res) => {
 
   const { orderId, status } = req.body;
 
-  db.run(
-    `UPDATE orders SET status = ? WHERE orderId = ?`,
-    [status, orderId],
-    function(err){
-      if(err){
-        return res.json({ success: false });
-      }
-      res.json({ success: true });
-    }
-  );
+  db.prepare(
+    `UPDATE orders SET status = ? WHERE orderId = ?`
+  ).run(status, orderId);
+
+  res.json({ success: true });
 });
 
 /* ===============================
