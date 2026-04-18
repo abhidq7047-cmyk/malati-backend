@@ -8,7 +8,7 @@ const nodemailer = require("nodemailer");
 const Database = require("better-sqlite3");
 const PDFDocument = require("pdfkit");
 const fs = require("fs");
-const twilio = require("twilio");
+const fetch = require("node-fetch");
 
 const app = express();
 app.use(express.json());
@@ -62,7 +62,7 @@ function saveOrder(order){
 }
 
 /* ===============================
-   PROFESSIONAL INVOICE
+   GENERATE INVOICE
 =============================== */
 function generateInvoice(order){
 
@@ -77,57 +77,41 @@ function generateInvoice(order){
 
   const pageWidth = doc.page.width;
 
-  /* LOGO CENTER */
   if (fs.existsSync("./logo.png")) {
     doc.image("./logo.png", pageWidth / 2 - 40, 30, { width: 80 });
   }
 
   doc.moveDown(4);
 
-  /* BRAND */
-  doc
-    .fontSize(18)
-    .fillColor("#0b7a3b")
-    .text("MALATI FOODS", { align: "center" });
-
-  doc
-    .fontSize(10)
-    .fillColor("black")
+  doc.fontSize(18).fillColor("#0b7a3b").text("MALATI FOODS", { align: "center" });
+  doc.fontSize(10).fillColor("black")
     .text("Cuttack, Odisha", { align: "center" })
     .text("Phone: 9348922068", { align: "center" })
     .text("Email: malatifoods@gmail.com", { align: "center" })
     .text("GSTIN: 21ABCDE1234F1Z5", { align: "center" });
 
   doc.moveDown(2);
-
   doc.fontSize(16).text("INVOICE", { align: "center" });
 
-  /* BOX */
   const boxTop = doc.y;
   doc.roundedRect(40, boxTop, 520, 90, 5).stroke();
 
   const date = new Date().toLocaleDateString();
 
-  doc
-    .fontSize(10)
+  doc.fontSize(10)
     .text(`Invoice No: ${order.orderId}`, 50, boxTop + 10)
     .text(`Date: ${date}`, 50, boxTop + 25)
     .text(`Payment ID: ${order.paymentId}`, 50, boxTop + 40);
 
-  doc
-    .text("Bill To:", 300, boxTop + 10)
+  doc.text("Bill To:", 300, boxTop + 10)
     .text(order.name, 300, boxTop + 25)
     .text(`Phone: ${order.phone}`, 300, boxTop + 40)
     .text(order.address, 300, boxTop + 55, { width: 200 });
 
-  /* TABLE */
   let tableTop = boxTop + 110;
 
   doc.rect(40, tableTop, 520, 25).fill("#0b7a3b");
-
-  doc
-    .fillColor("white")
-    .fontSize(11)
+  doc.fillColor("white").fontSize(11)
     .text("Item", 50, tableTop + 7)
     .text("Qty", 300, tableTop + 7)
     .text("Price", 360, tableTop + 7)
@@ -142,8 +126,7 @@ function generateInvoice(order){
     const itemTotal = item.price * item.qty;
     subtotal += itemTotal;
 
-    doc
-      .fontSize(10)
+    doc.fontSize(10)
       .text(item.name, 50, y)
       .text(item.qty, 300, y)
       .text(`₹${item.price}`, 360, y)
@@ -152,30 +135,16 @@ function generateInvoice(order){
     y += 20;
   });
 
-  /* TOTAL */
   const delivery = 0;
   const finalTotal = subtotal + delivery;
 
   doc.roundedRect(300, y + 10, 260, 90, 5).stroke();
 
-  doc
-    .fontSize(11)
+  doc.fontSize(11)
     .text(`Subtotal: ₹${subtotal}`, 310, y + 20)
     .text(`Delivery: ₹${delivery}`, 310, y + 40)
-    .fontSize(13)
-    .fillColor("#0b7a3b")
+    .fontSize(13).fillColor("#0b7a3b")
     .text(`Total: ₹${finalTotal}`, 310, y + 65);
-
-  doc.fillColor("black");
-
-  /* FOOTER */
-  doc
-    .fontSize(10)
-    .fillColor("gray")
-    .text("Thank you for shopping with Malati Foods 🙏", 40, 750, {
-      align: "center",
-      width: 520
-    });
 
   doc.end();
 
@@ -212,24 +181,37 @@ async function sendOrderEmail(order){
 }
 
 /* ===============================
-   WHATSAPP (SANDBOX)
+   WHATSAPP (META API)
 =============================== */
-const client = twilio(
-  process.env.TWILIO_SID,
-  process.env.TWILIO_AUTH
-);
-
 async function sendWhatsApp(order){
+  console.log("WHATSAPP FUNCTION STARTED 🚀");
 
-  const message = `Order ${order.orderId} confirmed. Total ₹${order.total}`;
+  try {
+    const url = `https://graph.facebook.com/v19.0/${process.env.PHONE_NUMBER_ID}/messages`;
 
-  await client.messages.create({
-    from: "whatsapp:+14155238886",
-    to: `whatsapp:+91${order.phone}`,
-    body: message
-  });
+    const response = await fetch(url, {
+      method: "POST",
+      headers: {
+        "Authorization": `Bearer ${process.env.ACCESS_TOKEN}`,
+        "Content-Type": "application/json"
+      },
+      body: JSON.stringify({
+        messaging_product: "whatsapp",
+        to: `91${order.phone}`,
+        type: "text",
+        text: {
+          body: `Test message`
+        }
+      })
+    });
+
+    const data = await response.json();
+    console.log("WHATSAPP RESPONSE:", data);
+
+  } catch (err) {
+    console.log("WHATSAPP ERROR:", err);
+  }
 }
-
 /* ===============================
    RAZORPAY
 =============================== */
