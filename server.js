@@ -196,13 +196,14 @@ async function sendWhatsApp(order){
         "Content-Type": "application/json"
       },
       body: JSON.stringify({
-        messaging_product: "whatsapp",
-        to: `91${order.phone}`,
-        type: "text",
-        text: {
-          body: `Test message`
-        }
-      })
+  messaging_product: "whatsapp",
+  to: `91${order.phone}`,
+  type: "document",
+  document: {
+    link: `https://malati-backend.onrender.com/invoices/${order.orderId}.pdf`,
+    filename: `${order.orderId}.pdf`
+  }
+})
     });
 
     const data = await response.json();
