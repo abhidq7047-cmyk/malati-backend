@@ -8,6 +8,7 @@ const nodemailer = require("nodemailer");
 const Database = require("better-sqlite3");
 const PDFDocument = require("pdfkit");
 const fs = require("fs");
+const path = require("path");
 const fetch = require("node-fetch");
 
 const app = express();
@@ -15,9 +16,9 @@ app.use(express.json());
 app.use(cors());
 
 /* ===============================
-   STATIC INVOICE
+   STATIC INVOICE (IMPORTANT)
 =============================== */
-app.use("/invoices", express.static("invoices"));
+app.use("/invoices", express.static(path.join(__dirname, "invoices")));
 
 /* ===============================
    DATABASE
@@ -66,85 +67,35 @@ function saveOrder(order){
 =============================== */
 function generateInvoice(order){
 
-  if (!fs.existsSync("./invoices")){
-    fs.mkdirSync("./invoices");
-  }
+  const dir = path.join(__dirname, "invoices");
+  if (!fs.existsSync(dir)) fs.mkdirSync(dir);
 
-  const filePath = `./invoices/${order.orderId}.pdf`;
+  const filePath = path.join(dir, `${order.orderId}.pdf`);
   const doc = new PDFDocument({ margin: 40 });
 
   doc.pipe(fs.createWriteStream(filePath));
 
-  const pageWidth = doc.page.width;
+  doc.fontSize(18).text("MALATI FOODS", { align: "center" });
+  doc.moveDown();
 
-  if (fs.existsSync("./logo.png")) {
-    doc.image("./logo.png", pageWidth / 2 - 40, 30, { width: 80 });
-  }
+  doc.fontSize(12)
+    .text(`Order ID: ${order.orderId}`)
+    .text(`Name: ${order.name}`)
+    .text(`Phone: ${order.phone}`)
+    .text(`Address: ${order.address}`);
 
-  doc.moveDown(4);
+  doc.moveDown();
 
-  doc.fontSize(18).fillColor("#0b7a3b").text("MALATI FOODS", { align: "center" });
-  doc.fontSize(10).fillColor("black")
-    .text("Cuttack, Odisha", { align: "center" })
-    .text("Phone: 9348922068", { align: "center" })
-    .text("Email: malatifoods@gmail.com", { align: "center" })
-    .text("GSTIN: 21ABCDE1234F1Z5", { align: "center" });
+  let total = 0;
 
-  doc.moveDown(2);
-  doc.fontSize(16).text("INVOICE", { align: "center" });
-
-  const boxTop = doc.y;
-  doc.roundedRect(40, boxTop, 520, 90, 5).stroke();
-
-  const date = new Date().toLocaleDateString();
-
-  doc.fontSize(10)
-    .text(`Invoice No: ${order.orderId}`, 50, boxTop + 10)
-    .text(`Date: ${date}`, 50, boxTop + 25)
-    .text(`Payment ID: ${order.paymentId}`, 50, boxTop + 40);
-
-  doc.text("Bill To:", 300, boxTop + 10)
-    .text(order.name, 300, boxTop + 25)
-    .text(`Phone: ${order.phone}`, 300, boxTop + 40)
-    .text(order.address, 300, boxTop + 55, { width: 200 });
-
-  let tableTop = boxTop + 110;
-
-  doc.rect(40, tableTop, 520, 25).fill("#0b7a3b");
-  doc.fillColor("white").fontSize(11)
-    .text("Item", 50, tableTop + 7)
-    .text("Qty", 300, tableTop + 7)
-    .text("Price", 360, tableTop + 7)
-    .text("Total", 450, tableTop + 7);
-
-  doc.fillColor("black");
-
-  let y = tableTop + 35;
-  let subtotal = 0;
-
-  order.items.forEach(item => {
-    const itemTotal = item.price * item.qty;
-    subtotal += itemTotal;
-
-    doc.fontSize(10)
-      .text(item.name, 50, y)
-      .text(item.qty, 300, y)
-      .text(`₹${item.price}`, 360, y)
-      .text(`₹${itemTotal}`, 450, y);
-
-    y += 20;
+  order.items.forEach(i => {
+    const t = i.price * i.qty;
+    total += t;
+    doc.text(`${i.name} × ${i.qty} = ₹${t}`);
   });
 
-  const delivery = 0;
-  const finalTotal = subtotal + delivery;
-
-  doc.roundedRect(300, y + 10, 260, 90, 5).stroke();
-
-  doc.fontSize(11)
-    .text(`Subtotal: ₹${subtotal}`, 310, y + 20)
-    .text(`Delivery: ₹${delivery}`, 310, y + 40)
-    .fontSize(13).fillColor("#0b7a3b")
-    .text(`Total: ₹${finalTotal}`, 310, y + 65);
+  doc.moveDown();
+  doc.text(`Total: ₹${total}`);
 
   doc.end();
 
@@ -168,9 +119,9 @@ async function sendOrderEmail(order){
 
   await transporter.sendMail({
     from: process.env.EMAIL_USER,
-    to: `${process.env.EMAIL_USER}, ${order.email}`,
-    subject: "🧾 Invoice - Malati Foods",
-    html: `<p>Order ${order.orderId} confirmed. Total ₹${order.total}</p>`,
+    to: `${process.env.EMAIL_USER}`,
+    subject: "Invoice - Malati Foods",
+    html: `<p>Order ${order.orderId} confirmed</p>`,
     attachments: [
       {
         filename: `${order.orderId}.pdf`,
@@ -181,38 +132,65 @@ async function sendOrderEmail(order){
 }
 
 /* ===============================
-   WHATSAPP (META API)
+   WHATSAPP TEMPLATE (FIRST MESSAGE)
 =============================== */
-async function sendWhatsApp(order){
-  console.log("WHATSAPP FUNCTION STARTED 🚀");
+async function sendWhatsAppTemplate(order){
 
-  try {
-    const url = `https://graph.facebook.com/v19.0/${process.env.PHONE_NUMBER_ID}/messages`;
+  console.log("TEMPLATE START 🚀");
 
-    const response = await fetch(url, {
-      method: "POST",
-      headers: {
-        "Authorization": `Bearer ${process.env.ACCESS_TOKEN}`,
-        "Content-Type": "application/json"
-      },
-      body: JSON.stringify({
-  messaging_product: "whatsapp",
-  to: `91${order.phone}`,
-  type: "document",
-  document: {
-    link: `https://malati-backend.onrender.com/invoices/${order.orderId}.pdf`,
-    filename: `${order.orderId}.pdf`
-  }
-})
-    });
+  const url = `https://graph.facebook.com/v19.0/${process.env.PHONE_NUMBER_ID}/messages`;
 
-    const data = await response.json();
-    console.log("WHATSAPP RESPONSE:", data);
+  const res = await fetch(url, {
+    method: "POST",
+    headers: {
+      Authorization: `Bearer ${process.env.ACCESS_TOKEN}`,
+      "Content-Type": "application/json"
+    },
+    body: JSON.stringify({
+      messaging_product: "whatsapp",
+      to: `91${order.phone}`,
+      type: "template",
+      template: {
+        name: "hello_world",
+        language: { code: "en_US" }
+      }
+    })
+  });
 
-  } catch (err) {
-    console.log("WHATSAPP ERROR:", err);
-  }
+  const data = await res.json();
+  console.log("TEMPLATE RESPONSE:", data);
 }
+
+/* ===============================
+   WHATSAPP PDF
+=============================== */
+async function sendWhatsAppPDF(order){
+
+  console.log("PDF SEND 🚀");
+
+  const url = `https://graph.facebook.com/v19.0/${process.env.PHONE_NUMBER_ID}/messages`;
+
+  const res = await fetch(url, {
+    method: "POST",
+    headers: {
+      Authorization: `Bearer ${process.env.ACCESS_TOKEN}`,
+      "Content-Type": "application/json"
+    },
+    body: JSON.stringify({
+      messaging_product: "whatsapp",
+      to: `91${order.phone}`,
+      type: "document",
+      document: {
+        link: `https://malati-backend.onrender.com/invoices/${order.orderId}.pdf`,
+        filename: `${order.orderId}.pdf`
+      }
+    })
+  });
+
+  const data = await res.json();
+  console.log("PDF RESPONSE:", data);
+}
+
 /* ===============================
    RAZORPAY
 =============================== */
@@ -267,7 +245,6 @@ app.post("/verify-payment", async (req, res) => {
     name: customer.name,
     phone: customer.phone,
     address: customer.address,
-    email: customer.email,
     items: cart,
     total,
     paymentId: razorpay_payment_id,
@@ -275,8 +252,12 @@ app.post("/verify-payment", async (req, res) => {
   };
 
   saveOrder(orderData);
+
   await sendOrderEmail(orderData);
-  await sendWhatsApp(orderData);
+
+  // 🔥 IMPORTANT FLOW
+  await sendWhatsAppTemplate(orderData); // first
+  await sendWhatsAppPDF(orderData);      // second
 
   res.json({ status: "success" });
 });
