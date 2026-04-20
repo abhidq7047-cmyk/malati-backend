@@ -24,6 +24,15 @@ cloudinary.config({
   api_secret: process.env.CLOUD_API_SECRET
 });
 
+async function uploadToCloudinary(filePath) {
+  const result = await cloudinary.uploader.upload(filePath, {
+    resource_type: "raw",   // ✅ VERY IMPORTANT for PDF
+    folder: "malati_invoices"
+  });
+
+  return result.secure_url;
+}
+
 /* ===============================
    DATABASE
 =============================== */
@@ -192,7 +201,10 @@ app.post("/verify-payment", async (req, res) => {
     const filePath = await generateInvoice(orderData);
 
     // UPLOAD TO CLOUDINARY
-    const pdfUrl = await uploadToCloudinary(filePath, orderId);
+const pdfPath = generateInvoice(orderData);
+
+
+    const pdfUrl = await uploadToCloudinary(pdfPath);
 
     console.log("📄 Cloudinary PDF:", pdfUrl);
 
