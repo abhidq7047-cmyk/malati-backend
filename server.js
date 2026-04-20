@@ -21,7 +21,7 @@ app.use(cors());
 cloudinary.config({
   cloud_name: process.env.CLOUD_NAME,
   api_key: process.env.CLOUD_API_KEY,
-  api_secret: process.env.CLOUD_API_SECRET
+  api_secret: process.env.CLOUD_API_SECRET,
 });
 
 /* ===============================
@@ -47,12 +47,14 @@ db.prepare(`
 /* ===============================
    SAVE ORDER
 =============================== */
-function saveOrder(order){
-  db.prepare(`
+function saveOrder(order) {
+  const stmt = db.prepare(`
     INSERT INTO orders 
     (orderId, name, phone, address, items, total, paymentId, status)
     VALUES (?, ?, ?, ?, ?, ?, ?, ?)
-  `).run(
+  `);
+
+  stmt.run(
     order.orderId,
     order.name,
     order.phone,
@@ -67,53 +69,56 @@ function saveOrder(order){
 /* ===============================
    GENERATE PDF
 =============================== */
-async function generateInvoice(order){
-  const dir = path.join(__dirname, "invoices");
-  if (!fs.existsSync(dir)) fs.mkdirSync(dir);
+function generateInvoice(order) {
+  return new Promise((resolve, reject) => {
+    const dir = path.join(__dirname, "invoices");
+    if (!fs.existsSync(dir)) fs.mkdirSync(dir);
 
-  const filePath = path.join(dir, `${order.orderId}.pdf`);
-  const doc = new PDFDocument({ margin: 40 });
-  const stream = fs.createWriteStream(filePath);
+    const filePath = path.join(dir, `${order.orderId}.pdf`);
+    const doc = new PDFDocument({ margin: 40 });
 
-  doc.pipe(stream);
+    const stream = fs.createWriteStream(filePath);
+    doc.pipe(stream);
 
-  doc.fontSize(18).text("MALATI FOODS", { align: "center" });
-  doc.moveDown();
+    doc.fontSize(18).text("MALATI FOODS", { align: "center" });
+    doc.moveDown();
 
-  doc.text(`Order ID: ${order.orderId}`);
-  doc.text(`Name: ${order.name}`);
-  doc.text(`Phone: ${order.phone}`);
-  doc.text(`Address: ${order.address}`);
+    doc.fontSize(12)
+      .text(`Order ID: ${order.orderId}`)
+      .text(`Name: ${order.name}`)
+      .text(`Phone: ${order.phone}`)
+      .text(`Address: ${order.address}`);
 
-  doc.moveDown();
+    doc.moveDown();
 
-  let total = 0;
-  order.items.forEach(i => {
-    const t = i.price * i.qty;
-    total += t;
-    doc.text(`${i.name} × ${i.qty} = ₹${t}`);
+    let total = 0;
+
+    order.items.forEach(i => {
+      const t = i.price * i.qty;
+      total += t;
+      doc.text(`${i.name} × ${i.qty} = ₹${t}`);
+    });
+
+    doc.moveDown();
+    doc.text(`Total: ₹${total}`);
+
+    doc.end();
+
+    stream.on("finish", () => resolve(filePath));
+    stream.on("error", reject);
   });
-
-  doc.moveDown();
-  doc.text(`Total: ₹${total}`);
-
-  doc.end();
-
-  await new Promise(resolve => stream.on("finish", resolve));
-
-  return filePath;
 }
 
 /* ===============================
-   CLOUDINARY UPLOAD
+   UPLOAD TO CLOUDINARY
 =============================== */
-async function uploadToCloudinary(filePath){
+async function uploadToCloudinary(filePath) {
   const result = await cloudinary.uploader.upload(filePath, {
     resource_type: "raw",
-    folder: "malati_invoices"
+    folder: "malati_invoices",
   });
 
-  return result.secure_url;
+  return result.secure_url; // ✅ IMPORTANT
 }
 
 /* ===============================
@@ -121,17 +126,20 @@ async function uploadToCloudinary(filePath){
 =============================== */
 const razorpay = new Razorpay({
   key_id: process.env.RAZORPAY_KEY_ID,
-  key_secret: process.env.RAZORPAY_KEY_SECRET
+  key_secret: process.env.RAZORPAY_KEY_SECRET,
 });
 
 /* ===============================
    CREATE ORDER
 =============================== */
 app.post("/create-order", async (req, res) => {
+  const { amount } = req.body;
+
   const order = await razorpay.orders.create({
-    amount: req.body.amount * 100,
-    currency: "INR"
+    amount: amount * 100,
+    currency: "INR",
   });
+
   res.json(order);
 });
 
@@ -140,7 +148,6 @@ app.post("/create-order", async (req, res) => {
 =============================== */
 app.post("/verify-payment", async (req, res) => {
   try {
-
     console.log("🔥 VERIFY PAYMENT HIT");
 
     const {
@@ -148,7 +155,7 @@ app.post("/verify-payment", async (req, res) => {
       razorpay_payment_id,
       razorpay_signature,
       cart,
-      customer
+      customer,
     } = req.body;
 
     const body = razorpay_order_id + "|" + razorpay_payment_id;
@@ -163,7 +170,7 @@ app.post("/verify-payment", async (req, res) => {
     }
 
     const orderId = "MALATI_" + Date.now();
-    const total = cart.reduce((s,i)=>s+i.price*i.qty,0);
+    const total = cart.reduce((sum, i) => sum + i.price * i.qty, 0);
 
     const orderData = {
       orderId,
@@ -173,33 +180,40 @@ app.post("/verify-payment", async (req, res) => {
       items: cart,
       total,
       paymentId: razorpay_payment_id,
-      status: "Processing"
+      status: "Processing",
     };
 
+    // SAVE
     saveOrder(orderData);
+    console.log("✅ Order saved");
 
-    const pdfPath = await generateInvoice(orderData);
-    const pdfUrl = await uploadToCloudinary(pdfPath);
+    // GENERATE PDF
+    const filePath = await generateInvoice(orderData);
+    console.log("📄 PDF generated:", filePath);
 
-    console.log("PDF URL:", pdfUrl);
+    // UPLOAD
+    const cloudinaryUrl = await uploadToCloudinary(filePath);
+    console.log("☁️ Cloudinary URL:", cloudinaryUrl);
 
     // SEND TO N8N
-    await fetch("https://n8n-malati.onrender.com/webhook/order", {
-  method: "POST",
-  headers: { "Content-Type": "application/json" },
-  body: JSON.stringify({
-    orderId: orderId,
-    phone: "91" + customer.phone,
-    invoiceUrl: cloudinaryUrl
-  })
-});
+    await fetch(process.env.N8N_WEBHOOK, {
+      method: "POST",
+      headers: {
+        "Content-Type": "application/json",
+      },
+      body: JSON.stringify({
+        orderId,
+        phone: "91" + customer.phone,
+        invoiceUrl: cloudinaryUrl,
+      }),
+    });
 
-    console.log("Sent to n8n ✅");
+    console.log("🚀 Sent to n8n");
 
     res.json({ status: "success" });
 
   } catch (err) {
-    console.error("ERROR:", err);
+    console.error("❌ ERROR:", err);
     res.status(500).json({ status: "error" });
   }
 });
@@ -207,6 +221,8 @@ app.post("/verify-payment", async (req, res) => {
 /* ===============================
    START
 =============================== */
-app.listen(process.env.PORT || 5000, () => {
-  console.log("🚀 Server running");
+const PORT = process.env.PORT || 5000;
+
+app.listen(PORT, () => {
+  console.log(`🚀 Server running on port ${PORT}`);
 });
