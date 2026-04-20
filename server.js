@@ -4,7 +4,6 @@ const express = require("express");
 const Razorpay = require("razorpay");
 const crypto = require("crypto");
 const cors = require("cors");
-const nodemailer = require("nodemailer");
 const Database = require("better-sqlite3");
 const PDFDocument = require("pdfkit");
 const fs = require("fs");
@@ -16,7 +15,7 @@ app.use(express.json());
 app.use(cors());
 
 /* ===============================
-   STATIC INVOICE (IMPORTANT)
+   STATIC INVOICE
 =============================== */
 app.use("/invoices", express.static(path.join(__dirname, "invoices")));
 
@@ -103,95 +102,6 @@ function generateInvoice(order){
 }
 
 /* ===============================
-   EMAIL
-=============================== */
-async function sendOrderEmail(order){
-
-  const transporter = nodemailer.createTransport({
-    service: "gmail",
-    auth: {
-      user: process.env.EMAIL_USER,
-      pass: process.env.EMAIL_PASS
-    }
-  });
-
-  const invoicePath = generateInvoice(order);
-
-  await transporter.sendMail({
-    from: process.env.EMAIL_USER,
-    to: `${process.env.EMAIL_USER}`,
-    subject: "Invoice - Malati Foods",
-    html: `<p>Order ${order.orderId} confirmed</p>`,
-    attachments: [
-      {
-        filename: `${order.orderId}.pdf`,
-        path: invoicePath
-      }
-    ]
-  });
-}
-
-/* ===============================
-   WHATSAPP TEMPLATE (FIRST MESSAGE)
-=============================== */
-async function sendWhatsAppTemplate(order){
-
-  console.log("TEMPLATE START 🚀");
-
-  const url = `https://graph.facebook.com/v19.0/${process.env.PHONE_NUMBER_ID}/messages`;
-
-  const res = await fetch(url, {
-    method: "POST",
-    headers: {
-      Authorization: `Bearer ${process.env.ACCESS_TOKEN}`,
-      "Content-Type": "application/json"
-    },
-    body: JSON.stringify({
-      messaging_product: "whatsapp",
-      to: `91${order.phone}`,
-      type: "template",
-      template: {
-        name: "hello_world",
-        language: { code: "en_US" }
-      }
-    })
-  });
-
-  const data = await res.json();
-  console.log("TEMPLATE RESPONSE:", data);
-}
-
-/* ===============================
-   WHATSAPP PDF
-=============================== */
-async function sendWhatsAppPDF(order){
-
-  console.log("PDF SEND 🚀");
-
-  const url = `https://graph.facebook.com/v19.0/${process.env.PHONE_NUMBER_ID}/messages`;
-
-  const res = await fetch(url, {
-    method: "POST",
-    headers: {
-      Authorization: `Bearer ${process.env.ACCESS_TOKEN}`,
-      "Content-Type": "application/json"
-    },
-    body: JSON.stringify({
-      messaging_product: "whatsapp",
-      to: `91${order.phone}`,
-      type: "document",
-      document: {
-        link: `https://malati-backend.onrender.com/invoices/${order.orderId}.pdf`,
-        filename: `${order.orderId}.pdf`
-      }
-    })
-  });
-
-  const data = await res.json();
-  console.log("PDF RESPONSE:", data);
-}
-
-/* ===============================
    RAZORPAY
 =============================== */
 const razorpay = new Razorpay({
@@ -218,48 +128,66 @@ app.post("/create-order", async (req, res) => {
 =============================== */
 app.post("/verify-payment", async (req, res) => {
 
-  const {
-    razorpay_order_id,
-    razorpay_payment_id,
-    razorpay_signature,
-    cart,
-    customer
-  } = req.body;
+  try {
 
-  const body = razorpay_order_id + "|" + razorpay_payment_id;
+    const {
+      razorpay_order_id,
+      razorpay_payment_id,
+      razorpay_signature,
+      cart,
+      customer
+    } = req.body;
 
-  const expectedSignature = crypto
-    .createHmac("sha256", process.env.RAZORPAY_KEY_SECRET)
-    .update(body)
-    .digest("hex");
+    const body = razorpay_order_id + "|" + razorpay_payment_id;
 
-  if (expectedSignature !== razorpay_signature) {
-    return res.json({ status: "failed" });
+    const expectedSignature = crypto
+      .createHmac("sha256", process.env.RAZORPAY_KEY_SECRET)
+      .update(body)
+      .digest("hex");
+
+    if (expectedSignature !== razorpay_signature) {
+      return res.json({ status: "failed" });
+    }
+
+    const orderId = "MALATI_" + Date.now();
+    const total = cart.reduce((sum,i)=>sum+i.price*i.qty,0);
+
+    const orderData = {
+      orderId,
+      name: customer.name,
+      phone: customer.phone,
+      address: customer.address,
+      items: cart,
+      total,
+      paymentId: razorpay_payment_id,
+      status: "Processing"
+    };
+
+    // SAVE ORDER
+    saveOrder(orderData);
+
+    // GENERATE INVOICE
+    generateInvoice(orderData);
+
+    // SEND TO N8N 🚀
+    console.log("Sending order to n8n...");
+
+    await fetch("https://n8n-malati.onrender.com/webhook-test/order", {
+      method: "POST",
+      headers: {
+        "Content-Type": "application/json"
+      },
+      body: JSON.stringify(orderData)
+    });
+
+    console.log("Sent to n8n ✅");
+
+    res.json({ status: "success" });
+
+  } catch (err) {
+    console.error("ERROR:", err);
+    res.status(500).json({ status: "error" });
   }
-
-  const orderId = "MALATI_" + Date.now();
-  const total = cart.reduce((sum,i)=>sum+i.price*i.qty,0);
-
-  const orderData = {
-    orderId,
-    name: customer.name,
-    phone: customer.phone,
-    address: customer.address,
-    items: cart,
-    total,
-    paymentId: razorpay_payment_id,
-    status: "Processing"
-  };
-
-  saveOrder(orderData);
-
-  await sendOrderEmail(orderData);
-
-  // 🔥 IMPORTANT FLOW
-  await sendWhatsAppTemplate(orderData); // first
-  await sendWhatsAppPDF(orderData);      // second
-
-  res.json({ status: "success" });
 });
 
 /* ===============================
