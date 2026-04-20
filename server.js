@@ -9,15 +9,20 @@ const PDFDocument = require("pdfkit");
 const fs = require("fs");
 const path = require("path");
 const fetch = require("node-fetch");
+const cloudinary = require("cloudinary").v2;
 
 const app = express();
 app.use(express.json());
 app.use(cors());
 
 /* ===============================
-   STATIC INVOICE
+   CLOUDINARY CONFIG
 =============================== */
-app.use("/invoices", express.static(path.join(__dirname, "invoices")));
+cloudinary.config({
+  cloud_name: process.env.CLOUD_NAME,
+  api_key: process.env.CLOUD_API_KEY,
+  api_secret: process.env.CLOUD_API_SECRET
+});
 
 /* ===============================
    DATABASE
@@ -42,7 +47,7 @@ db.prepare(`
 /* ===============================
    SAVE ORDER
 =============================== */
-function saveOrder(order){
+function saveOrder(order) {
   const stmt = db.prepare(`
     INSERT INTO orders 
     (orderId, name, phone, address, items, total, paymentId, status)
@@ -64,41 +69,58 @@ function saveOrder(order){
 /* ===============================
    GENERATE INVOICE
 =============================== */
-function generateInvoice(order){
+function generateInvoice(order) {
+  return new Promise((resolve, reject) => {
 
-  const dir = path.join(__dirname, "invoices");
-  if (!fs.existsSync(dir)) fs.mkdirSync(dir);
+    const dir = path.join(process.cwd(), "invoices");
+    if (!fs.existsSync(dir)) fs.mkdirSync(dir);
 
-  const filePath = path.join(dir, `${order.orderId}.pdf`);
-  const doc = new PDFDocument({ margin: 40 });
+    const filePath = path.join(dir, `${order.orderId}.pdf`);
+    const doc = new PDFDocument({ margin: 40 });
 
-  doc.pipe(fs.createWriteStream(filePath));
+    const stream = fs.createWriteStream(filePath);
+    doc.pipe(stream);
 
-  doc.fontSize(18).text("MALATI FOODS", { align: "center" });
-  doc.moveDown();
+    doc.fontSize(18).text("MALATI FOODS", { align: "center" });
+    doc.moveDown();
 
-  doc.fontSize(12)
-    .text(`Order ID: ${order.orderId}`)
-    .text(`Name: ${order.name}`)
-    .text(`Phone: ${order.phone}`)
-    .text(`Address: ${order.address}`);
+    doc.fontSize(12)
+      .text(`Order ID: ${order.orderId}`)
+      .text(`Name: ${order.name}`)
+      .text(`Phone: ${order.phone}`)
+      .text(`Address: ${order.address}`);
 
-  doc.moveDown();
+    doc.moveDown();
 
-  let total = 0;
+    let total = 0;
 
-  order.items.forEach(i => {
-    const t = i.price * i.qty;
-    total += t;
-    doc.text(`${i.name} × ${i.qty} = ₹${t}`);
+    order.items.forEach(i => {
+      const t = i.price * i.qty;
+      total += t;
+      doc.text(`${i.name} × ${i.qty} = ₹${t}`);
+    });
+
+    doc.moveDown();
+    doc.text(`Total: ₹${total}`);
+
+    doc.end();
+
+    stream.on("finish", () => resolve(filePath));
+    stream.on("error", reject);
+  });
+}
+
+/* ===============================
+   UPLOAD TO CLOUDINARY
+=============================== */
+async function uploadToCloudinary(filePath, orderId) {
+  const result = await cloudinary.uploader.upload(filePath, {
+    resource_type: "raw",
+    public_id: `invoice_${orderId}`,
+    folder: "malati_invoices"
   });
 
-  doc.moveDown();
-  doc.text(`Total: ₹${total}`);
-
-  doc.end();
-
-  return filePath;
+  return result.secure_url;
 }
 
 /* ===============================
@@ -127,7 +149,6 @@ app.post("/create-order", async (req, res) => {
    VERIFY PAYMENT
 =============================== */
 app.post("/verify-payment", async (req, res) => {
-
   try {
 
     const {
@@ -138,6 +159,7 @@ app.post("/verify-payment", async (req, res) => {
       customer
     } = req.body;
 
+    // VERIFY SIGNATURE
     const body = razorpay_order_id + "|" + razorpay_payment_id;
 
     const expectedSignature = crypto
@@ -150,12 +172,12 @@ app.post("/verify-payment", async (req, res) => {
     }
 
     const orderId = "MALATI_" + Date.now();
-    const total = cart.reduce((sum,i)=>sum+i.price*i.qty,0);
+    const total = cart.reduce((sum, i) => sum + i.price * i.qty, 0);
 
     const orderData = {
       orderId,
       name: customer.name,
-      phone: customer.phone,
+      phone: "91" + customer.phone,
       address: customer.address,
       items: cart,
       total,
@@ -166,28 +188,44 @@ app.post("/verify-payment", async (req, res) => {
     // SAVE ORDER
     saveOrder(orderData);
 
-    // GENERATE INVOICE
-    generateInvoice(orderData);
+    // GENERATE PDF
+    const filePath = await generateInvoice(orderData);
 
-    // SEND TO N8N 🚀
-    console.log("Sending order to n8n...");
+    // UPLOAD TO CLOUDINARY
+    const pdfUrl = await uploadToCloudinary(filePath, orderId);
 
-    await fetch("https://n8n-malati.onrender.com/webhook-test/order", {
+    console.log("📄 Cloudinary PDF:", pdfUrl);
+
+    // SEND TO N8N
+    await fetch("https://n8n-malati.onrender.com/webhook/order", {
       method: "POST",
       headers: {
         "Content-Type": "application/json"
       },
-      body: JSON.stringify(orderData)
+      body: JSON.stringify({
+        ...orderData,
+        invoiceUrl: pdfUrl
+      })
     });
 
-    console.log("Sent to n8n ✅");
+    console.log("✅ Sent to n8n");
 
-    res.json({ status: "success" });
+    res.json({
+      status: "success",
+      invoice: pdfUrl
+    });
 
   } catch (err) {
-    console.error("ERROR:", err);
+    console.error("❌ ERROR:", err);
     res.status(500).json({ status: "error" });
   }
+});
+
+/* ===============================
+   TEST ROUTE
+=============================== */
+app.get("/", (req, res) => {
+  res.send("🚀 Malati Backend Running with Cloudinary");
 });
 
 /* ===============================
