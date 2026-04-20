@@ -113,12 +113,9 @@ async function generateInvoice(order){
    UPLOAD TO CLOUDINARY
 =============================== */
 async function uploadToCloudinary(filePath){
-  const result = await cloudinary.uploader.upload(filePath, {
-    resource_type: "raw",   // IMPORTANT for PDF
-    folder: "malati_invoices"
+  return await cloudinary.uploader.upload(filePath, {
+    resource_type: "raw"
   });
-
-  return result.secure_url;
 }
 
 /* ===============================
@@ -194,7 +191,7 @@ app.post("/verify-payment", async (req, res) => {
     console.log("PDF generated:", pdfPath);
 
     // UPLOAD
-    const pdfUrl = await uploadToCloudinary(pdfPath);
+    const pdfUrl = (await uploadToCloudinary(pdfPath)).secure_url;
     console.log("Cloudinary PDF:", pdfUrl);
 
     // SEND TO N8N
