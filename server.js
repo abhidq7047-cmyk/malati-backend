@@ -48,13 +48,11 @@ db.prepare(`
    SAVE ORDER
 =============================== */
 function saveOrder(order){
-  const stmt = db.prepare(`
+  db.prepare(`
     INSERT INTO orders 
     (orderId, name, phone, address, items, total, paymentId, status)
     VALUES (?, ?, ?, ?, ?, ?, ?, ?)
-  `);
-
-  stmt.run(
+  `).run(
     order.orderId,
     order.name,
     order.phone,
@@ -67,17 +65,16 @@ function saveOrder(order){
 }
 
 /* ===============================
-   GENERATE INVOICE (FIXED)
+   GENERATE PDF
 =============================== */
 async function generateInvoice(order){
-
   const dir = path.join(__dirname, "invoices");
   if (!fs.existsSync(dir)) fs.mkdirSync(dir);
 
   const filePath = path.join(dir, `${order.orderId}.pdf`);
   const doc = new PDFDocument({ margin: 40 });
-
   const stream = fs.createWriteStream(filePath);
+
   doc.pipe(stream);
 
   doc.fontSize(18).text("MALATI FOODS", { align: "center" });
@@ -91,7 +88,6 @@ async function generateInvoice(order){
   doc.moveDown();
 
   let total = 0;
-
   order.items.forEach(i => {
     const t = i.price * i.qty;
     total += t;
@@ -103,19 +99,21 @@ async function generateInvoice(order){
 
   doc.end();
 
-  // ✅ wait for file creation
   await new Promise(resolve => stream.on("finish", resolve));
 
   return filePath;
 }
 
 /* ===============================
-   UPLOAD TO CLOUDINARY
+   CLOUDINARY UPLOAD
 =============================== */
 async function uploadToCloudinary(filePath){
-  return await cloudinary.uploader.upload(filePath, {
-    resource_type: "raw"
+  const result = await cloudinary.uploader.upload(filePath, {
+    resource_type: "raw",
+    folder: "malati_invoices"
   });
+
+  return result.secure_url;
 }
 
 /* ===============================
@@ -130,21 +128,17 @@ const razorpay = new Razorpay({
    CREATE ORDER
 =============================== */
 app.post("/create-order", async (req, res) => {
-  const { amount } = req.body;
-
   const order = await razorpay.orders.create({
-    amount: amount * 100,
+    amount: req.body.amount * 100,
     currency: "INR"
   });
-
   res.json(order);
 });
 
 /* ===============================
-   VERIFY PAYMENT (FINAL FLOW)
+   VERIFY PAYMENT
 =============================== */
 app.post("/verify-payment", async (req, res) => {
-
   try {
 
     console.log("🔥 VERIFY PAYMENT HIT");
@@ -169,7 +163,7 @@ app.post("/verify-payment", async (req, res) => {
     }
 
     const orderId = "MALATI_" + Date.now();
-    const total = cart.reduce((sum,i)=>sum+i.price*i.qty,0);
+    const total = cart.reduce((s,i)=>s+i.price*i.qty,0);
 
     const orderData = {
       orderId,
@@ -182,36 +176,30 @@ app.post("/verify-payment", async (req, res) => {
       status: "Processing"
     };
 
-    // SAVE
     saveOrder(orderData);
-    console.log("Order saved");
 
-    // GENERATE PDF
     const pdfPath = await generateInvoice(orderData);
-    console.log("PDF generated:", pdfPath);
+    const pdfUrl = await uploadToCloudinary(pdfPath);
 
-    // UPLOAD
-    const pdfUrl = (await uploadToCloudinary(pdfPath)).secure_url;
-    console.log("Cloudinary PDF:", pdfUrl);
+    console.log("PDF URL:", pdfUrl);
 
     // SEND TO N8N
     await fetch("https://n8n-malati.onrender.com/webhook/order", {
-      method: "POST",
-      headers: {
-        "Content-Type": "application/json"
-      },
-      body: JSON.stringify({
-        ...orderData,
-        pdfUrl
-      })
-    });
+  method: "POST",
+  headers: { "Content-Type": "application/json" },
+  body: JSON.stringify({
+    orderId: orderId,
+    phone: "91" + customer.phone,
+    invoiceUrl: cloudinaryUrl
+  })
+});
 
     console.log("Sent to n8n ✅");
 
     res.json({ status: "success" });
 
   } catch (err) {
-    console.error("VERIFY ERROR:", err);
+    console.error("ERROR:", err);
     res.status(500).json({ status: "error" });
   }
 });
@@ -219,8 +207,6 @@ app.post("/verify-payment", async (req, res) => {
 /* ===============================
    START
 =============================== */
-const PORT = process.env.PORT || 5000;
-
-app.listen(PORT, () => {
-  console.log(`🚀 Server running on port ${PORT}`);
+app.listen(process.env.PORT || 5000, () => {
+  console.log("🚀 Server running");
 });
