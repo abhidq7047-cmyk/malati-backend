@@ -5,18 +5,22 @@ const Razorpay = require("razorpay");
 const crypto = require("crypto");
 const cors = require("cors");
 const Database = require("better-sqlite3");
-const PDFDocument = require("pdfkit");
 const fs = require("fs");
 const path = require("path");
-const fetch = require("node-fetch");
 const cloudinary = require("cloudinary").v2;
+
+// ✅ IMPORT YOUR FILES
+const generateInvoice = require("./invoice"); // puppeteer version
+const sendMail = require("./mail");
+const sendWhatsApp = require("./whatsapp");
+const uploadPDF = require("./cloudinary");
 
 const app = express();
 app.use(express.json());
 app.use(cors());
 
 /* ===============================
-   CLOUDINARY CONFIG
+   CLOUDINARY
 =============================== */
 cloudinary.config({
   cloud_name: process.env.CLOUD_NAME,
@@ -48,13 +52,11 @@ db.prepare(`
    SAVE ORDER
 =============================== */
 function saveOrder(order) {
-  const stmt = db.prepare(`
+  db.prepare(`
     INSERT INTO orders 
     (orderId, name, phone, address, items, total, paymentId, status)
     VALUES (?, ?, ?, ?, ?, ?, ?, ?)
-  `);
-
-  stmt.run(
+  `).run(
     order.orderId,
     order.name,
     order.phone,
@@ -64,61 +66,6 @@ function saveOrder(order) {
     order.paymentId,
     order.status
   );
-}
-
-/* ===============================
-   GENERATE PDF
-=============================== */
-function generateInvoice(order) {
-  return new Promise((resolve, reject) => {
-    const dir = path.join(__dirname, "invoices");
-    if (!fs.existsSync(dir)) fs.mkdirSync(dir);
-
-    const filePath = path.join(dir, `${order.orderId}.pdf`);
-    const doc = new PDFDocument({ margin: 40 });
-
-    const stream = fs.createWriteStream(filePath);
-    doc.pipe(stream);
-
-    doc.fontSize(18).text("MALATI FOODS", { align: "center" });
-    doc.moveDown();
-
-    doc.fontSize(12)
-      .text(`Order ID: ${order.orderId}`)
-      .text(`Name: ${order.name}`)
-      .text(`Phone: ${order.phone}`)
-      .text(`Address: ${order.address}`);
-
-    doc.moveDown();
-
-    let total = 0;
-
-    order.items.forEach(i => {
-      const t = i.price * i.qty;
-      total += t;
-      doc.text(`${i.name} × ${i.qty} = ₹${t}`);
-    });
-
-    doc.moveDown();
-    doc.text(`Total: ₹${total}`);
-
-    doc.end();
-
-    stream.on("finish", () => resolve(filePath));
-    stream.on("error", reject);
-  });
-}
-
-/* ===============================
-   UPLOAD TO CLOUDINARY
-=============================== */
-async function uploadToCloudinary(filePath) {
-  const result = await cloudinary.uploader.upload(filePath, {
-    resource_type: "raw",
-    folder: "malati_invoices",
-  });
-
-  return result.secure_url; // ✅ IMPORTANT
 }
 
 /* ===============================
@@ -144,7 +91,7 @@ app.post("/create-order", async (req, res) => {
 });
 
 /* ===============================
-   VERIFY PAYMENT
+   VERIFY PAYMENT (FINAL FLOW)
 =============================== */
 app.post("/verify-payment", async (req, res) => {
   try {
@@ -158,6 +105,7 @@ app.post("/verify-payment", async (req, res) => {
       customer,
     } = req.body;
 
+    // 🔐 VERIFY SIGNATURE
     const body = razorpay_order_id + "|" + razorpay_payment_id;
 
     const expectedSignature = crypto
@@ -169,7 +117,9 @@ app.post("/verify-payment", async (req, res) => {
       return res.json({ status: "failed" });
     }
 
+    // 📦 ORDER DATA
     const orderId = "MALATI_" + Date.now();
+
     const total = cart.reduce((sum, i) => sum + i.price * i.qty, 0);
 
     const orderData = {
@@ -183,32 +133,32 @@ app.post("/verify-payment", async (req, res) => {
       status: "Processing",
     };
 
-    // SAVE
+    // 💾 SAVE ORDER
     saveOrder(orderData);
     console.log("✅ Order saved");
 
-    // GENERATE PDF
-    const filePath = await generateInvoice(orderData);
-    console.log("📄 PDF generated:", filePath);
-
-    // UPLOAD
-    const cloudinaryUrl = await uploadToCloudinary(filePath);
-    console.log("☁️ Cloudinary URL:", cloudinaryUrl);
-
-    // SEND TO N8N
-    await fetch(process.env.N8N_WEBHOOK, {
-      method: "POST",
-      headers: {
-        "Content-Type": "application/json",
-      },
-      body: JSON.stringify({
-        orderId,
-        phone: "91" + customer.phone,
-        invoiceUrl: cloudinaryUrl,
-      }),
+    // 📄 GENERATE PDF (BUFFER)
+    const pdfBuffer = await generateInvoice({
+      name: customer.name,
+      phone: customer.phone,
+      address: customer.address,
+      cart: cart,
+      amount: total,
     });
 
-    console.log("🚀 Sent to n8n");
+    console.log("📄 PDF generated");
+
+    // ☁️ UPLOAD TO CLOUDINARY
+    const pdfUrl = await uploadPDF(pdfBuffer);
+    console.log("☁️ Uploaded:", pdfUrl);
+
+    // 📧 SEND EMAIL (YOU ONLY)
+    await sendMail(pdfBuffer, total, customer);
+
+    // 📲 SEND WHATSAPP (PDF)
+    await sendWhatsApp(customer, total, pdfUrl);
+
+    console.log("🚀 FULL FLOW COMPLETED");
 
     res.json({ status: "success" });
 
@@ -219,7 +169,7 @@ app.post("/verify-payment", async (req, res) => {
 });
 
 /* ===============================
-   START
+   START SERVER
 =============================== */
 const PORT = process.env.PORT || 5000;
 
