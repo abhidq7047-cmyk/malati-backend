@@ -5,12 +5,12 @@ const Razorpay = require("razorpay");
 const crypto = require("crypto");
 const cors = require("cors");
 const Database = require("better-sqlite3");
-const fs = require("fs");
-const path = require("path");
 const cloudinary = require("cloudinary").v2;
 
-// ✅ IMPORT YOUR FILES
-const generateInvoice = require("./invoice"); // puppeteer version
+/* ===============================
+   IMPORT MODULES
+=============================== */
+const generateInvoice = require("./invoice");
 const sendMail = require("./mail");
 const sendWhatsApp = require("./whatsapp");
 const uploadPDF = require("./cloudinary");
@@ -20,7 +20,7 @@ app.use(express.json());
 app.use(cors());
 
 /* ===============================
-   CLOUDINARY
+   CLOUDINARY CONFIG
 =============================== */
 cloudinary.config({
   cloud_name: process.env.CLOUD_NAME,
@@ -69,7 +69,7 @@ function saveOrder(order) {
 }
 
 /* ===============================
-   RAZORPAY
+   RAZORPAY CONFIG
 =============================== */
 const razorpay = new Razorpay({
   key_id: process.env.RAZORPAY_KEY_ID,
@@ -80,47 +80,78 @@ const razorpay = new Razorpay({
    CREATE ORDER
 =============================== */
 app.post("/create-order", async (req, res) => {
-  const { amount } = req.body;
+  try {
+    const { amount } = req.body;
 
-  const order = await razorpay.orders.create({
-    amount: amount * 100,
-    currency: "INR",
-  });
+    if (!amount || amount <= 0) {
+      return res.status(400).json({ error: "Invalid amount" });
+    }
 
-  res.json(order);
+    const order = await razorpay.orders.create({
+      amount: amount * 100, // ₹ → paise
+      currency: "INR",
+    });
+
+    res.json(order);
+
+  } catch (err) {
+    console.error("Create Order Error:", err);
+    res.status(500).json({ error: "Order creation failed" });
+  }
 });
 
 /* ===============================
-   VERIFY PAYMENT (FINAL FLOW)
+   VERIFY PAYMENT (MAIN LOGIC)
 =============================== */
 app.post("/verify-payment", async (req, res) => {
   try {
-    console.log("🔥 VERIFY PAYMENT HIT");
 
     const {
       razorpay_order_id,
       razorpay_payment_id,
       razorpay_signature,
       cart,
-      customer,
+      customer
     } = req.body;
 
-    // 🔐 VERIFY SIGNATURE
-    const body = razorpay_order_id + "|" + razorpay_payment_id;
-
-    const expectedSignature = crypto
-      .createHmac("sha256", process.env.RAZORPAY_KEY_SECRET)
-      .update(body)
-      .digest("hex");
-
-    if (expectedSignature !== razorpay_signature) {
-      return res.json({ status: "failed" });
+    /* ===============================
+       VALIDATION
+    =============================== */
+    if (!razorpay_order_id || !razorpay_payment_id || !razorpay_signature) {
+      return res.status(400).json({ status: "failed", error: "Missing payment data" });
     }
 
-    // 📦 ORDER DATA
+    /* ===============================
+       SIGNATURE VERIFY
+    =============================== */
+    const sign = razorpay_order_id + "|" + razorpay_payment_id;
+
+    const expectedSign = crypto
+      .createHmac("sha256", process.env.RAZORPAY_KEY_SECRET)
+      .update(sign)
+      .digest("hex");
+
+    if (expectedSign !== razorpay_signature) {
+      return res.status(400).json({ status: "failed", error: "Invalid signature" });
+    }
+
+    console.log("✅ Payment verified");
+
+    /* ===============================
+       CHECK DATA
+    =============================== */
+    if (!cart || !customer) {
+      return res.status(400).json({ status: "failed", error: "Missing order data" });
+    }
+
+    /* ===============================
+       ORDER DATA
+    =============================== */
     const orderId = "MALATI_" + Date.now();
 
-    const total = cart.reduce((sum, i) => sum + i.price * i.qty, 0);
+    const total = cart.reduce((sum, item) => {
+      return sum + item.price * item.qty;
+    }, 0);
 
     const orderData = {
       orderId,
@@ -133,29 +164,39 @@ app.post("/verify-payment", async (req, res) => {
       status: "Processing",
     };
 
-    // 💾 SAVE ORDER
+    /* ===============================
+       SAVE ORDER
+    =============================== */
     saveOrder(orderData);
     console.log("✅ Order saved");
 
-    // 📄 GENERATE PDF (BUFFER)
+    /* ===============================
+       GENERATE INVOICE PDF
+    =============================== */
     const pdfBuffer = await generateInvoice({
       name: customer.name,
       phone: customer.phone,
       address: customer.address,
-      cart: cart,
+      cart,
       amount: total,
     });
 
     console.log("📄 PDF generated");
 
-    // ☁️ UPLOAD TO CLOUDINARY
+    /* ===============================
+       UPLOAD TO CLOUDINARY
+    =============================== */
     const pdfUrl = await uploadPDF(pdfBuffer);
     console.log("☁️ Uploaded:", pdfUrl);
 
-    // 📧 SEND EMAIL (YOU ONLY)
+    /* ===============================
+       SEND EMAIL
+    =============================== */
     await sendMail(pdfBuffer, total, customer);
 
-    // 📲 SEND WHATSAPP (PDF)
+    /* ===============================
+       SEND WHATSAPP
+    =============================== */
     await sendWhatsApp(customer, total, pdfUrl);
 
     console.log("🚀 FULL FLOW COMPLETED");
@@ -163,13 +204,13 @@ app.post("/verify-payment", async (req, res) => {
     res.json({ status: "success" });
 
   } catch (err) {
-    console.error("❌ ERROR:", err);
-    res.status(500).json({ status: "error" });
+    console.error("❌ Verify Error:", err);
+    res.status(500).json({ status: "failed", error: "Server error" });
   }
 });
 
 /* ===============================
-   START SERVER
+   SERVER START
 =============================== */
 const PORT = process.env.PORT || 5000;
 
